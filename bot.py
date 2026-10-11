@@ -684,7 +684,14 @@ async def start_health_check_server():
 async def main():
     logging.info(">>> Инициализация и запуск бота версии 2.0... <<<")
     await start_health_check_server()
-    await bot.delete_webhook(drop_pending_updates=True)
+
+    logging.info("Проверка и сброс активного вебхука Telegram...")
+    try:
+        await bot.delete_webhook(drop_pending_updates=True)
+        logging.info("Вебхук успешно удален, бот готов к приему обновлений через polling.")
+    except Exception as e:
+        logging.warning(f"Предупреждение при удалении вебхука: {e}")
+
     logging.info(">>> БОТ ВЕРСИИ 2.0 УСПЕШНО ЗАПУЩЕН И ГОТОВ К РАБОТЕ <<<")
     try:
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
