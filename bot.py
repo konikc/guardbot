@@ -129,6 +129,17 @@ async def kick_user_if_not_verified(chat_id: int, user_id: int, welcome_message_
     else:
         verified_users.discard((chat_id, user_id))
  
+async def is_admin(message: Message) -> bool:
+    if message.from_user.id in ALLOWED_ADMIN_IDS or message.from_user.id == OWNER_ID:
+        return True
+    if message.chat.type in ["group", "supergroup"]:
+        try:
+            member = await bot.get_chat_member(chat_id=message.chat.id, user_id=message.from_user.id)
+            return member.status in ["creator", "administrator"]
+        except Exception:
+            return False
+    return False
+
 @dp.message(Command("start", ignore_mention=True))
 async def cmd_start(message: Message):
     if message.chat.type == "private":
@@ -136,8 +147,13 @@ async def cmd_start(message: Message):
             "<b>Привет! Я бот для защиты, модерации, репортов и варнов в чатах.\n\n"
             "Добавь меня в свою группу и выдай права администратора!</b>"
         )
+    else:
+        await message.answer(
+            "✅ <b>Бот версии 2.0 успешно запущен и работает в группе!</b>\n\n"
+            "Используйте <code>/help</code> или <code>/gethelp</code> для просмотра команд."
+        )
  
-@dp.message(Command("gethelp", ignore_mention=True))
+@dp.message(Command("gethelp", "help", ignore_mention=True))
 async def cmd_help(message: Message):
     help_text = (
         "<b>Данный бот был создан в целях ознакомить новых участников "
@@ -160,7 +176,7 @@ async def cmd_help(message: Message):
     )
     await message.answer(help_text, disable_web_page_preview=True)
  
-@dp.message(Command("upd", ignore_mention=True))
+@dp.message(Command("upd", "version", ignore_mention=True))
 async def cmd_upd(message: Message):
     upd_text = (
         "⚙️ <b>Версия бота: 2.0</b>\n\n"
@@ -200,7 +216,7 @@ async def cmd_call(message: Message, command: CommandObject):
 @dp.message(Command("on", ignore_mention=True))
 async def cmd_on(message: Message):
     global verification_enabled
-    if message.from_user.id in ALLOWED_ADMIN_IDS:
+    if await is_admin(message):
         if verification_enabled:
             await message.answer("<b>Бот уже работает!</b>")
         else:
@@ -212,7 +228,7 @@ async def cmd_on(message: Message):
 @dp.message(Command("off", ignore_mention=True))
 async def cmd_off(message: Message):
     global verification_enabled
-    if message.from_user.id in ALLOWED_ADMIN_IDS:
+    if await is_admin(message):
         if not verification_enabled:
             await message.answer("<b>Бот уже выключен!</b>")
         else:
@@ -221,10 +237,11 @@ async def cmd_off(message: Message):
     else:
         await message.answer("❌ У вас нет прав для использования этой команды.")
  
-# СИСТЕМА ВЫГОВОРОВ ДЛЯ АДМИНИСТРАЦИИ (🔴, 🟡, 🟢 с текстом)
+# СИСТЕМА ВЫГОВОРОВ ДЛЯ АДМИНИСТРАЦИИ (🔴, 🟡, 🟢 или /warn с текстом)
+@dp.message(Command("warn", ignore_mention=True))
 @dp.message(F.text.regexp(r"^(🔴|🟡|🟢)\s*(.+)"))
-async def handle_warns(message: Message):
-    if message.from_user.id not in ALLOWED_ADMIN_IDS:
+async def handle_warns(message: Message, command: CommandObject = None):
+    if not await is_admin(message):
         return
  
     if not message.reply_to_message:
@@ -235,9 +252,23 @@ async def handle_warns(message: Message):
     target_id = target_user.id
     target_name = target_user.full_name
  
-    text = message.text.strip()
-    color_symbol = text[0]
-    comment = text[1:].strip()
+    text = (message.text or "").strip()
+    color_map = {"🔴": "red", "🟡": "yellow", "🟢": "green", "red": "red", "yellow": "yellow", "green": "green"}
+
+    if command and command.args:
+        parts = command.args.split(maxsplit=1)
+        c_arg = parts[0].lower()
+        color_key = color_map.get(c_arg, "red")
+        color_symbol = "🔴" if color_key == "red" else ("🟡" if color_key == "yellow" else "🟢")
+        comment = parts[1].strip() if len(parts) > 1 else ""
+    elif text and text[0] in color_map:
+        color_symbol = text[0]
+        color_key = color_map[color_symbol]
+        comment = text[1:].strip()
+    else:
+        color_symbol = "🔴"
+        color_key = "red"
+        comment = text
  
     if not comment:
         await message.reply("⚠️ <b>Текст выговора обязателен!</b> Пример: <code>🔴 - плохо себя ведет</code>")
@@ -299,7 +330,7 @@ async def handle_warns(message: Message):
 # Команда /checkwarn (только для админов)
 @dp.message(Command("checkwarn", ignore_mention=True))
 async def cmd_checkwarn(message: Message):
-    if message.from_user.id not in ALLOWED_ADMIN_IDS:
+    if not await is_admin(message):
         await message.reply("❌ <b>Эта команда доступна только администрации!</b>")
         return
  
@@ -454,10 +485,11 @@ async def cmd_allreports(message: Message):
  
     await message.answer(text)
  
-# СИСТЕМА РЕПУТАЦИИ (+реп / -реп)
+# СИСТЕМА РЕПУТАЦИИ (+реп / -реп или /rep+ / /rep-)
+@dp.message(Command("rep+", "rep-", ignore_mention=True))
 @dp.message(F.text.lower().startswith(("+реп", "-реп")))
-async def handle_reputation(message: Message):
-    if message.from_user.id not in ALLOWED_ADMIN_IDS:
+async def handle_reputation(message: Message, command: CommandObject = None):
+    if not await is_admin(message):
         return
  
     if not message.reply_to_message:
@@ -468,11 +500,14 @@ async def handle_reputation(message: Message):
     target_id = target_user.id
     target_name = target_user.full_name
  
-    text_lower = message.text.lower()
-    is_positive = text_lower.startswith("+реп")
- 
-    parts = message.text.split(maxsplit=1)
-    comment = parts[1] if len(parts) > 1 else ""
+    if command:
+        is_positive = (command.command == "rep+")
+        comment = (command.args or "").strip()
+    else:
+        text_lower = message.text.lower()
+        is_positive = text_lower.startswith("+реп")
+        parts = message.text.split(maxsplit=1)
+        comment = parts[1] if len(parts) > 1 else ""
  
     if target_id not in reputation_db:
         reputation_db[target_id] = {"score": 0, "name": target_name}
@@ -511,7 +546,7 @@ async def cmd_checkrep(message: Message, command: CommandObject):
 # Обнуление репутации (/resetrep)
 @dp.message(Command("resetrep", ignore_mention=True))
 async def cmd_resetrep(message: Message):
-    if message.from_user.id not in ALLOWED_ADMIN_IDS:
+    if not await is_admin(message):
         await message.answer("❌ У вас нет прав для использования этой команды.")
         return
  
