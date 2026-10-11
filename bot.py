@@ -1,8 +1,11 @@
+import os
+import sys
 import asyncio
 import logging
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandObject
 from aiogram.client.default import DefaultBotProperties
+from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ParseMode
 from aiogram.types import (
     ChatPermissions,
@@ -11,24 +14,63 @@ from aiogram.types import (
     CallbackQuery,
     Message
 )
- 
-BOT_TOKEN = '8939255575:AAHJtvufWwQ5xjDBd01bn21q7m2B6k3Ak3g'
- 
+
+# Загрузка переменных окружения из .env (с поддержкой как python-dotenv, так и прямого парсинга)
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    if os.path.exists(env_path):
+        try:
+            with open(env_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith("#") and "=" in line:
+                        k, v = line.split("=", 1)
+                        k = k.strip()
+                        v = v.strip().strip("'\"")
+                        if k and k not in os.environ:
+                            os.environ[k] = v
+        except Exception:
+            pass
+
+def parse_id_list(var_name: str, default: list) -> list:
+    val = os.getenv(var_name)
+    if not val:
+        return default
+    parsed = []
+    for part in val.split(","):
+        cleaned = part.strip()
+        if cleaned.lstrip("-").isdigit():
+            parsed.append(int(cleaned))
+    return parsed if parsed else default
+
+# Конфигурация из переменных окружения или значения по умолчанию
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8939255575:AAHJtvufWwQ5xjDBd01bn21q7m2B6k3Ak3g").strip()
+if not BOT_TOKEN:
+    logging.critical("КРИТИЧЕСКАЯ ОШИБКА: BOT_TOKEN не указан в .env или переменных окружения!")
+    sys.exit(1)
+
 # ID администраторов для выдачи варнов, репортов и спецкоманд
-# (@allbebacck - 5115391739, @allbebback - 8302063926, @celerong4 - 6737858010)
-OWNER_ID = 5115391739
-REPORT_RECEIVER_IDS = [5115391739, 6737858010]
-ALLOWED_ADMIN_IDS = [5115391739, 8302063926, 6737858010]
-ALL_REPORTS_ADMIN_IDS = [5115391739, 8302063926, 6737858010]
- 
+OWNER_ID = int(os.getenv("OWNER_ID", "5115391739"))
+REPORT_RECEIVER_IDS = parse_id_list("REPORT_RECEIVER_IDS", [5115391739, 6737858010])
+ALLOWED_ADMIN_IDS = parse_id_list("ALLOWED_ADMIN_IDS", [5115391739, 8302063926, 6737858010])
+ALL_REPORTS_ADMIN_IDS = parse_id_list("ALL_REPORTS_ADMIN_IDS", [5115391739, 8302063926, 6737858010])
+
+RULES_URL = os.getenv("RULES_URL", "https://t.me/zhiznkoto/19679").strip()
+KICK_TIMEOUT = int(os.getenv("KICK_TIMEOUT", "600"))
+
+# Поддержка прокси (если задан PROXY_URL)
+PROXY_URL = os.getenv("PROXY_URL", "").strip() or None
+session = AiohttpSession(proxy=PROXY_URL) if PROXY_URL else None
+
 bot = Bot(
     token=BOT_TOKEN,
+    session=session,
     default=DefaultBotProperties(parse_mode=ParseMode.HTML)
 )
 dp = Dispatcher()
- 
-RULES_URL = "https://t.me"
-KICK_TIMEOUT = 600  # 10 минут
  
 # Флаг состояния проверки (включена по умолчанию)
 verification_enabled = True
@@ -106,8 +148,7 @@ async def cmd_help(message: Message):
         "<b>🚨 Система репортов:</b>\n"
         "• <code>/report</code> (или <code>/rep</code>) — отправить жалобу модерации (ответом на сообщение).\n"
         "• <code>/myreports</code> — просмотреть и управлять своими репортами.\n\n"
- 
-"<b>⭐ Система репутации:</b>\n"
+        "<b>⭐ Система репутации:</b>\n"
         "• <code>+реп [текст]</code> / <code>-реп [текст]</code> — изменить репутацию (ответом).\n"
         "• <code>/checkrep</code> — проверить репутацию.\n"
         "• <code>/resetrep</code> — обнулить репутацию.\n\n"
@@ -186,7 +227,7 @@ async def handle_warns(message: Message):
     if message.from_user.id not in ALLOWED_ADMIN_IDS:
         return
  
-if not message.reply_to_message:
+    if not message.reply_to_message:
         await message.reply("⚠️ <b>Ответьте на сообщение администратора, чтобы выдать выговор!</b>")
         return
  
@@ -507,7 +548,7 @@ async def cmd_cstart(message: Message):
         [InlineKeyboardButton(text="✅ Я ознакомился(ась) с правилами ✅", callback_data=f"verify_{user.id}")]
     ])
  
-welcome_text = (
+    welcome_text = (
         f'<b>Привет, <a href="tg://user?id={user.id}">{user.full_name}</a>!\n\n'
         f'Пожалуйста, ознакомься <a href="{RULES_URL}">с правилами чата</a> и нажми на кнопку ниже, '
         f'чтобы получить возможность писать в чат.</b>'
@@ -576,11 +617,51 @@ async def process_verify(callback: CallbackQuery):
         logging.error(f"Ошибка при снятии ограничений: {e}")
         await callback.answer("Не удалось снять ограничения. Проверь права бота!", show_alert=True)
  
+async def start_health_check_server():
+    """
+    Запуск простого веб-сервера для health-check, если хостинг требует привязки к PORT (Render, Railway, Heroku и др.).
+    Если переменная PORT не задана (VPS, обычный сервер), веб-сервер не запускается.
+    """
+    port_str = os.getenv("PORT")
+    if not port_str:
+        return
+    try:
+        port = int(port_str)
+    except ValueError:
+        return
+
+    from aiohttp import web
+
+    app = web.Application()
+
+    async def health_handler(request):
+        return web.Response(text="Bot is running!")
+
+    app.router.add_get("/", health_handler)
+    app.router.add_get("/health", health_handler)
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    logging.info(f"Health-check HTTP сервер запущен на порту {port}")
+
 async def main():
-    print(">>> БОТ ВЕРСИИ 2.0 УСПЕШНО ЗАПУЩЕН И ГОТОВ К РАБОТЕ <<<")
+    logging.info(">>> Инициализация и запуск бота версии 2.0... <<<")
+    await start_health_check_server()
     await bot.delete_webhook(drop_pending_updates=True)
-    await dp.start_polling(bot, allowed_updates=["message", "callback_query", "chat_member"])
- 
-if name == "main":
-    logging.basicConfig(level=logging.INFO)
-    asyncio.run(main())
+    logging.info(">>> БОТ ВЕРСИИ 2.0 УСПЕШНО ЗАПУЩЕН И ГОТОВ К РАБОТЕ <<<")
+    try:
+        await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+    finally:
+        await bot.session.close()
+
+if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+    )
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        logging.info("Бот остановлен.")
